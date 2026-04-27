@@ -1,4 +1,4 @@
-from google.cloud import bigquery
+from google.cloud import bigquery, storage
 import functions_framework
 import os
 
@@ -28,6 +28,7 @@ def gcs_to_bq(cloud_event):
     print(f"Processing file: {uri}")
 
     client = bigquery.Client()
+    storage_client = storage.Client()
 
     table_ref = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
@@ -38,12 +39,41 @@ def gcs_to_bq(cloud_event):
         write_disposition="WRITE_APPEND"
     )
 
-    load_job = client.load_table_from_uri(
-        uri,
-        table_ref,
-        job_config=job_config
-    )
+    try:
+        load_job = client.load_table_from_uri(
+            uri,
+            table_ref,
+            job_config=job_config
+        )
 
-    load_job.result()
+        load_job.result()
 
-    print(f"Loaded {uri} into {table_ref}")
+        print(f"Loaded {uri} into {table_ref}")
+
+        # Move the processed file to the success folder
+        _move_blob(storage_client, bucket_name, file_name, "processed_success")
+
+    except Exception as e:
+        print(f"Failed to load {uri} into {table_ref}: {e}")
+
+        # Move the failed file to the failed folder
+        try:
+            _move_blob(storage_client, bucket_name, file_name, "failed")
+        except Exception as move_err:
+            print(f"Failed to move failed file: {move_err}")
+
+        return
+
+
+def _move_blob(storage_client, bucket_name, source_blob_name, dest_prefix):
+    """Copy the blob to dest_prefix/<basename> and delete the original."""
+    bucket = storage_client.bucket(bucket_name)
+    source_blob = bucket.blob(source_blob_name)
+
+    destination_blob_name = f"{dest_prefix.rstrip('/')}/{os.path.basename(source_blob_name)}"
+
+    # Copy then delete (move)
+    bucket.copy_blob(source_blob, bucket, destination_blob_name)
+    source_blob.delete()
+
+    print(f"Moved gs://{bucket_name}/{source_blob_name} to gs://{bucket_name}/{destination_blob_name}")
